@@ -1,8 +1,10 @@
 
+/* use physical address not bus address */
 #define MMIO_BASE 0x3F000000
 
+/* GPIO */
 #define GPFSEL0         ((volatile unsigned int*)(MMIO_BASE+0x00200000))
-#define GPFSEL1         ((volatile unsigned int*)(MMIO_BASE+0x00200004))
+#define GPFSEL1         ((volatile unsigned int*)(MMIO_BASE+0x00200004)) // need
 #define GPFSEL2         ((volatile unsigned int*)(MMIO_BASE+0x00200008))
 #define GPFSEL3         ((volatile unsigned int*)(MMIO_BASE+0x0020000C))
 #define GPFSEL4         ((volatile unsigned int*)(MMIO_BASE+0x00200010))
@@ -17,7 +19,7 @@
 #define GPHEN0          ((volatile unsigned int*)(MMIO_BASE+0x00200064))
 #define GPHEN1          ((volatile unsigned int*)(MMIO_BASE+0x00200068))
 #define GPPUD           ((volatile unsigned int*)(MMIO_BASE+0x00200094))
-#define GPPUDCLK0       ((volatile unsigned int*)(MMIO_BASE+0x00200098))
+#define GPPUDCLK0       ((volatile unsigned int*)(MMIO_BASE+0x00200098)) // need
 #define GPPUDCLK1       ((volatile unsigned int*)(MMIO_BASE+0x0020009C))
 
 /* Auxilary mini UART reg */
@@ -45,8 +47,10 @@ void uart_init(){
 
     register unsigned int r;
     r = *GPFSEL1;
-    r &= ~((0b111 << 12) | (0b111 << 15)); // gpio14, gpio15
-    r |= (0b010 << 12) | (0b010 << 15);    // alt5
+    r &= ~((0b111 << 12) | (0b111 << 15)); // clean gpio14 & gpio15
+    r |= (0b010 << 12) | (0b010 << 15);    // set alt5(0b010) bcm2835 -> TXD1, RXD1
+
+    /* according to bcm2835 spec p101 */
     *GPFSEL1 = r;
     *GPPUD = 0;            // enable pins 14 and 15
     r = 150; while(r--) asm volatile("nop");
@@ -63,6 +67,8 @@ void uart_send(unsigned int c) {
     /* wait until we can send */
     do{
         asm volatile("nop");
+        // No.5 bit -> empty, No.6 bit -> idle, 0x20 -> 0"01"0 0000
+        // if AUX_MU_LSR = 00"1"0 0000, means transmitter empty, leave loop
     }while(!(*AUX_MU_LSR & 0x20));
     /* write the character to the buffer */
     *AUX_MU_IO = c;
@@ -73,6 +79,8 @@ char uart_getc() {
     /* wait until something is in the buffer */
     do{
         asm volatile("nop");
+        // 0000 0001
+        // if AUX_MU_LSR = 0000 0001, means data ready, leave loop
     }while(!(*AUX_MU_LSR & 0x01));
     /* read it and return */
 
@@ -196,11 +204,30 @@ void get_ARM_memory(){
     uart_puts("\r\n");
 }
 
+#define PM_PASSWORD 0x5a000000
+#define PM_RSTC 0x3F10001c
+#define PM_WDOG 0x3F100024
+
+void set(long addr, unsigned int value) {
+    volatile unsigned int* point = (unsigned int*)addr;
+    *point = value;
+}
+
+void reset(int tick) {                 // reboot after watchdog timer expire
+    set(PM_RSTC, PM_PASSWORD | 0x20);  // full reset
+    set(PM_WDOG, PM_PASSWORD | tick);  // number of watchdog tick
+}
+
+void cancel_reset() {
+    set(PM_RSTC, PM_PASSWORD | 0);  // full reset
+    set(PM_WDOG, PM_PASSWORD | 0);  // number of watchdog tick
+}
 
 int main(){
     uart_init();
-    uart_puts("> ");
     char *buf = buffer;
+    while(*buf) *buf++ = '\0';
+    uart_puts("> ");
     while(1){
         *buf++ = uart_getc();
         if(*(buf-1) == '\r' || *(buf-1) == '\n'){
@@ -226,6 +253,10 @@ int main(){
                 uart_puts("\r\n");
                 uart_puts("# Board Revision Info #\n");
                 get_board_revision();
+            }
+            else if(_strcmp("reboot\n")){
+                uart_puts("start reboot...\n");
+                reset(1000);
             }
             else {
                 uart_puts("\r\n");
